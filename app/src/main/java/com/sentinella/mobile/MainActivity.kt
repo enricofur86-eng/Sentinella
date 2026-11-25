@@ -56,7 +56,7 @@ class MainActivity : ComponentActivity() {
                 while (true) {
                     val list = withContext(Dispatchers.IO) { Engine.due(Db.get(this@MainActivity)) }
                     list.forEach { m -> App.scope.launch { Engine.runOne(applicationContext, m) } }
-                    delay(3000)
+                    delay(1000)
                 }
             }
         }

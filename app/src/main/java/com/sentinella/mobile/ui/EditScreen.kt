@@ -54,8 +54,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val INTERVALS = listOf(20, 30, 60, 120, 300, 600, 1800, 3600)
-private val TIMEOUTS = listOf(3, 5, 10, 20, 30)
+private val INTERVALS = listOf(5, 10, 15, 20, 30, 60, 120, 300, 600, 1800, 3600)
+private val TIMEOUTS = listOf(2, 3, 5, 10, 20, 30)
 private val RETRIES = listOf(0, 1, 2, 3, 5)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,7 +140,10 @@ private fun EditForm(start: Monitor, modifier: Modifier, onSaved: (Long) -> Unit
         )
 
         Section("Tempo massimo di risposta")
-        ChipRow(TIMEOUTS.map { it to "$it s" }, timeout) { timeout = it }
+        ChipRow(TIMEOUTS.filter { it < interval }.map { it to "$it s" }, timeout.coerceAtMost(interval - 1)) { timeout = it }
+        if (timeout >= interval) {
+            Text("Ridotto a ${interval - 1} s perché deve essere più corto dell'intervallo.", color = K.Muted, fontSize = 12.sp)
+        }
 
         SwitchRow("Avvisi", "Notifica quando va offline o torna online", notify) { notify = it }
         if (isHttp) {

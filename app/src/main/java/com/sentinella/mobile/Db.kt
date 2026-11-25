@@ -5,10 +5,11 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.sentinella.mobile.ui.ChartPoint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 
-class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "sentinella.db", null, 1) {
+class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "sentinella.db", null, 2) {
 
     companion object {
         @Volatile
@@ -50,9 +51,72 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "sentinella.d
                 important INTEGER NOT NULL DEFAULT 0)"""
         )
         db.execSQL("CREATE INDEX beats_mt ON beats(monitor_id, time)")
+        createOutages(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            createOutages(db)
+            backfillOutages(db)
+        }
+    }
+
+    private fun createOutages(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE outages(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                monitor_id INTEGER NOT NULL,
+                start_time INTEGER NOT NULL,
+                end_time INTEGER,
+                reached_down INTEGER NOT NULL DEFAULT 0,
+                msg TEXT NOT NULL DEFAULT '')"""
+        )
+        db.execSQL("CREATE INDEX outages_ms ON outages(monitor_id, start_time)")
+    }
+
+    /** Ricostruisce le interruzioni dai controlli già registrati (aggiornamento dalla 1.0.1). */
+    private fun backfillOutages(db: SQLiteDatabase) {
+        var mon = -1L
+        var start: Long? = null
+        var down = false
+        var msg = ""
+        fun flush(end: Long?) {
+            val st = start
+            if (st != null) {
+                val cv = ContentValues().apply {
+                    put("monitor_id", mon)
+                    put("start_time", st)
+                    if (end != null) put("end_time", end) else putNull("end_time")
+                    put("reached_down", if (down) 1 else 0)
+                    put("msg", msg)
+                }
+                db.insert("outages", null, cv)
+            }
+            start = null
+            down = false
+        }
+        db.rawQuery("SELECT monitor_id, time, status, msg FROM beats ORDER BY monitor_id, time", null).use { c ->
+            while (c.moveToNext()) {
+                val m = c.getLong(0)
+                val t = c.getLong(1)
+                val st = c.getInt(2)
+                if (m != mon) {
+                    flush(null)
+                    mon = m
+                }
+                if (st != ST_UP) {
+                    if (start == null) {
+                        start = t
+                        msg = c.getString(3) ?: ""
+                    }
+                    if (st == ST_DOWN) down = true
+                } else {
+                    flush(t)
+                }
+            }
+            flush(null)
+        }
+    }
 
     // ---------- monitor ----------
 
@@ -107,6 +171,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "sentinella.d
     fun setActive(id: Long, active: Boolean) {
         val cv = ContentValues().apply { put("active", if (active) 1 else 0) }
         writableDatabase.update("monitors", cv, "id=?", arrayOf(id.toString()))
+        if (!active) closeOpenOutages(id, System.currentTimeMillis())
     }
 
     fun setCertExpiry(id: Long, t: Long) {
@@ -116,6 +181,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "sentinella.d
 
     fun deleteMonitor(id: Long) {
         writableDatabase.delete("beats", "monitor_id=?", arrayOf(id.toString()))
+        writableDatabase.delete("outages", "monitor_id=?", arrayOf(id.toString()))
         writableDatabase.delete("monitors", "id=?", arrayOf(id.toString()))
     }
 
@@ -197,5 +263,78 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "sentinella.d
             "beats", "(important=0 AND time<?) OR time<?",
             arrayOf((now - 31 * DAY_MS).toString(), (now - 365 * DAY_MS).toString())
         )
+        writableDatabase.delete(
+            "outages", "end_time IS NOT NULL AND end_time<?", arrayOf((now - 365 * DAY_MS).toString())
+        )
+    }
+
+    /** Tempi di risposta medi raggruppati in intervalli di [size] ms, per il grafico. */
+    fun chartPoints(id: Long, from: Long, size: Long): List<ChartPoint> =
+        readableDatabase.rawQuery(
+            """SELECT (time-?)/? AS b, AVG(CASE WHEN status!=$ST_DOWN THEN ping END)
+               FROM beats WHERE monitor_id=? AND time>=? GROUP BY b ORDER BY b""",
+            arrayOf(from.toString(), size.toString(), id.toString(), from.toString())
+        ).use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    if (c.isNull(1)) continue
+                    add(ChartPoint(from + c.getLong(0) * size + size / 2, c.getDouble(1).toFloat()))
+                }
+            }
+        }
+
+    // ---------- interruzioni ----------
+
+    private fun Cursor.toOutage() = Outage(
+        id = getLong(getColumnIndexOrThrow("id")),
+        monitorId = getLong(getColumnIndexOrThrow("monitor_id")),
+        start = getLong(getColumnIndexOrThrow("start_time")),
+        end = getColumnIndexOrThrow("end_time").let { if (isNull(it)) null else getLong(it) },
+        reachedDown = getInt(getColumnIndexOrThrow("reached_down")) != 0,
+        msg = getString(getColumnIndexOrThrow("msg")) ?: "",
+    )
+
+    private fun outageQuery(where: String, args: Array<String>, tail: String = ""): List<Outage> =
+        readableDatabase.rawQuery("SELECT * FROM outages WHERE $where ORDER BY start_time DESC $tail", args)
+            .use { c -> buildList { while (c.moveToNext()) add(c.toOutage()) } }
+
+    fun openOutage(id: Long): Outage? =
+        outageQuery("monitor_id=? AND end_time IS NULL", arrayOf(id.toString()), "LIMIT 1").firstOrNull()
+
+    fun lastOutage(id: Long): Outage? =
+        outageQuery("monitor_id=?", arrayOf(id.toString()), "LIMIT 1").firstOrNull()
+
+    /** Le interruzioni più recenti, dalla più nuova. */
+    fun outages(id: Long, limit: Int): List<Outage> =
+        outageQuery("monitor_id=?", arrayOf(id.toString()), "LIMIT $limit")
+
+    /** Interruzioni che toccano il periodo dal momento [since] a oggi. */
+    fun outagesSince(id: Long, since: Long): List<Outage> =
+        outageQuery("monitor_id=? AND (end_time IS NULL OR end_time>=?)", arrayOf(id.toString(), since.toString()))
+
+    fun startOutage(monitorId: Long, start: Long, down: Boolean, msg: String) {
+        val cv = ContentValues().apply {
+            put("monitor_id", monitorId)
+            put("start_time", start)
+            putNull("end_time")
+            put("reached_down", if (down) 1 else 0)
+            put("msg", msg)
+        }
+        writableDatabase.insert("outages", null, cv)
+    }
+
+    fun markOutageDown(outageId: Long) {
+        val cv = ContentValues().apply { put("reached_down", 1) }
+        writableDatabase.update("outages", cv, "id=?", arrayOf(outageId.toString()))
+    }
+
+    fun closeOutage(outageId: Long, end: Long) {
+        val cv = ContentValues().apply { put("end_time", end) }
+        writableDatabase.update("outages", cv, "id=?", arrayOf(outageId.toString()))
+    }
+
+    fun closeOpenOutages(monitorId: Long, end: Long) {
+        val cv = ContentValues().apply { put("end_time", end) }
+        writableDatabase.update("outages", cv, "monitor_id=? AND end_time IS NULL", arrayOf(monitorId.toString()))
     }
 }

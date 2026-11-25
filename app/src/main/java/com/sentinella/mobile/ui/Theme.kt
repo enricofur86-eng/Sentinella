@@ -10,9 +10,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -22,6 +22,8 @@ import com.sentinella.mobile.ST_DOWN
 import com.sentinella.mobile.ST_PENDING
 import com.sentinella.mobile.ST_UP
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -83,13 +85,16 @@ fun KCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> 
     }
 }
 
-/** Carica dati dal database e li ricarica a ogni nuovo controllo. */
+/** Carica dati dal database e li ricarica dopo ogni nuovo controllo (al massimo una volta al secondo). */
 @Composable
 fun <T> rememberDb(vararg keys: Any?, load: (Db) -> T): State<T?> {
     val ctx = LocalContext.current
-    val version by Db.changes.collectAsState()
-    return produceState<T?>(initialValue = null, *keys, version) {
-        value = withContext(Dispatchers.IO) { load(Db.get(ctx)) }
+    val currentLoad by rememberUpdatedState(load)
+    return produceState<T?>(initialValue = null, *keys) {
+        Db.changes.conflate().collect {
+            value = withContext(Dispatchers.IO) { currentLoad(Db.get(ctx)) }
+            delay(1000)
+        }
     }
 }
 
@@ -109,6 +114,24 @@ fun fmtInterval(sec: Int): String = when {
     sec < 60 -> "$sec s"
     sec < 3600 -> "${sec / 60} min"
     else -> "${sec / 3600} h"
+}
+
+/** Durata leggibile: "10 s", "2 min 5 s", "1 h 20 min", "2 g 3 h". */
+fun fmtDuration(ms: Long): String {
+    val s = (ms / 1000).coerceAtLeast(0)
+    return when {
+        s < 60 -> "$s s"
+        s < 3600 -> if (s % 60 == 0L) "${s / 60} min" else "${s / 60} min ${s % 60} s"
+        s < 86400 -> if (s % 3600 / 60 == 0L) "${s / 3600} h" else "${s / 3600} h ${s % 3600 / 60} min"
+        else -> "${s / 86400} g ${s % 86400 / 3600} h"
+    }
+}
+
+/** Ora se è oggi, altrimenti giorno e ora. */
+fun fmtWhen(t: Long): String {
+    val day = SimpleDateFormat("yyyyMMdd", IT)
+    val today = day.format(Date()) == day.format(Date(t))
+    return SimpleDateFormat(if (today) "HH:mm:ss" else "dd/MM HH:mm:ss", IT).format(Date(t))
 }
 
 fun fmtTime(t: Long): String = SimpleDateFormat("HH:mm:ss", IT).format(Date(t))

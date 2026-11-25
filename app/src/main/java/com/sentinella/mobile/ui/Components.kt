@@ -36,7 +36,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sentinella.mobile.Beat
-import com.sentinella.mobile.ST_DOWN
+import com.sentinella.mobile.Outage
 import java.text.SimpleDateFormat
 import java.util.Date
 import kotlin.math.abs
@@ -118,52 +118,24 @@ fun HeartbeatBar(
 
 data class ChartPoint(val t: Long, val v: Float)
 
+data class ChartZone(val start: Long, val end: Long, val down: Boolean)
+
 data class ChartData(
     val from: Long,
     val to: Long,
     val pts: List<ChartPoint>,
-    val downs: List<Pair<Long, Long>>,
+    val zones: List<ChartZone>,
     val gapMs: Long,
 )
 
-/** Riduce i controlli a un massimo di [buckets] punti per disegnarli velocemente. */
-fun buildChart(beats: List<Beat>, from: Long, to: Long, intervalMs: Long, buckets: Int = 240): ChartData {
-    val span = (to - from).coerceAtLeast(1)
-    val size = (span / buckets).coerceAtLeast(1)
-    val pts: List<ChartPoint>
-    val downFlags: List<Pair<Long, Boolean>>
-    if (beats.size <= buckets) {
-        pts = beats.filter { it.status != ST_DOWN && it.ping != null }.map { ChartPoint(it.time, it.ping!!.toFloat()) }
-        downFlags = beats.map { it.time to (it.status == ST_DOWN) }
-    } else {
-        val sum = LongArray(buckets)
-        val cnt = IntArray(buckets)
-        val down = BooleanArray(buckets)
-        val any = BooleanArray(buckets)
-        for (b in beats) {
-            val i = ((b.time - from) / size).toInt().coerceIn(0, buckets - 1)
-            any[i] = true
-            if (b.status == ST_DOWN) down[i] = true
-            else if (b.ping != null) {
-                sum[i] += b.ping; cnt[i]++
-            }
-        }
-        pts = (0 until buckets).filter { cnt[it] > 0 }
-            .map { ChartPoint(from + it * size + size / 2, sum[it].toFloat() / cnt[it]) }
-        downFlags = (0 until buckets).filter { any[it] }.map { (from + it * size) to down[it] }
-    }
-    // zone rosse: dall'inizio di un controllo fallito fino al primo controllo riuscito
-    val downs = mutableListOf<Pair<Long, Long>>()
-    var start: Long? = null
-    for ((t, d) in downFlags) {
-        if (d && start == null) start = t
-        if (!d && start != null) {
-            downs += start to t; start = null
-        }
-    }
-    start?.let { downs += it to to }
-    val gap = maxOf(size * 3, (intervalMs * 2.5).toLong())
-    return ChartData(from, to, pts, downs, gap)
+/** Dimensione dei gruppi di controlli per avere al massimo ~240 punti nel grafico. */
+fun chartBucket(from: Long, to: Long, intervalMs: Long): Long =
+    maxOf((to - from) / 240, intervalMs, 1000L)
+
+fun buildChart(pts: List<ChartPoint>, outages: List<Outage>, from: Long, to: Long, bucket: Long, intervalMs: Long): ChartData {
+    val zones = outages.map { ChartZone(maxOf(it.start, from), it.end ?: to, it.reachedDown) }
+    val gap = maxOf(bucket * 3, (intervalMs * 2.5).toLong())
+    return ChartData(from, to, pts, zones, gap)
 }
 
 private fun niceMax(v: Float): Float {
@@ -223,10 +195,13 @@ fun ResponseChart(data: ChartData, modifier: Modifier = Modifier) {
             nc.drawText("${v.roundToInt()} ms", left - 6.dp.toPx(), yy + 3.5.dp.toPx(), label)
         }
 
-        for ((a, b) in data.downs) {
-            val xa = x(a).coerceIn(left, left + w)
-            val xb = x(b).coerceIn(left, left + w)
-            drawRect(K.Red.copy(alpha = 0.30f), Offset(xa, top), Size((xb - xa).coerceAtLeast(2.dp.toPx()), h))
+        for (z in data.zones) {
+            val xa = x(z.start).coerceIn(left, left + w)
+            val xb = x(z.end).coerceIn(left, left + w)
+            drawRect(
+                (if (z.down) K.Red else K.Orange).copy(alpha = 0.30f),
+                Offset(xa, top), Size((xb - xa).coerceAtLeast(2.dp.toPx()), h),
+            )
         }
 
         // segmenti continui (si interrompono se mancano controlli)
@@ -271,7 +246,7 @@ fun ResponseChart(data: ChartData, modifier: Modifier = Modifier) {
             nc.drawText(axisFmt.format(Date(t)), x(t), size.height - 5.dp.toPx(), label)
         }
 
-        if (data.pts.isEmpty() && data.downs.isEmpty()) {
+        if (data.pts.isEmpty() && data.zones.isEmpty()) {
             label.textAlign = Paint.Align.CENTER
             label.textSize = 13.sp.toPx()
             nc.drawText("Nessun dato nel periodo", left + w / 2, top + h / 2, label)

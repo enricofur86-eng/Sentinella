@@ -49,13 +49,20 @@ import com.sentinella.mobile.Beat
 import com.sentinella.mobile.DAY_MS
 import com.sentinella.mobile.MainActivity
 import com.sentinella.mobile.Monitor
+import com.sentinella.mobile.Outage
 import com.sentinella.mobile.Prefs
 import com.sentinella.mobile.ST_DOWN
 import com.sentinella.mobile.ST_PENDING
 import com.sentinella.mobile.ST_UP
 import com.sentinella.mobile.isIgnoringBattery
 
-data class HomeItem(val m: Monitor, val last: Beat?, val up24: Double?, val beats: List<Beat>) {
+data class HomeItem(
+    val m: Monitor,
+    val last: Beat?,
+    val up24: Double?,
+    val beats: List<Beat>,
+    val lastOutage: Outage?,
+) {
     val status: Int? get() = last?.status
 }
 
@@ -74,7 +81,7 @@ fun HomeScreen(onOpen: (Long) -> Unit, onAdd: () -> Unit, onSettings: () -> Unit
     val items by rememberDb { db ->
         val now = System.currentTimeMillis()
         db.monitors().map { m ->
-            HomeItem(m, db.lastBeat(m.id), db.uptime(m.id, now - DAY_MS), db.recentBeats(m.id, 60))
+            HomeItem(m, db.lastBeat(m.id), db.uptime(m.id, now - DAY_MS), db.recentBeats(m.id, 60), db.lastOutage(m.id))
         }.sortedWith(compareBy<HomeItem> { rank(it) }.thenBy { it.m.name.lowercase() })
     }
     val tick by MainActivity.resumeTick.collectAsState()
@@ -177,6 +184,21 @@ private fun MonitorRow(item: HomeItem, onClick: () -> Unit) {
         }
         Spacer(Modifier.height(10.dp))
         HeartbeatBar(item.beats, height = 18.dp)
+        val o = item.lastOutage
+        val now = System.currentTimeMillis()
+        if (o != null && item.m.active && (o.ongoing || now - (o.end ?: now) < DAY_MS)) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (o.ongoing) "Non risponde da ${fmtDuration(o.duration(now))}"
+                else "Ultima interruzione: ${fmtWhen(o.start)} · ${fmtDuration(o.duration(now))}",
+                color = when {
+                    o.ongoing && o.reachedDown -> K.Red
+                    o.ongoing -> K.Orange
+                    else -> K.Muted
+                },
+                fontSize = 12.sp,
+            )
+        }
     }
 }
 

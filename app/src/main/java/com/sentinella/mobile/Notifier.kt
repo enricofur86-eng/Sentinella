@@ -42,15 +42,15 @@ object Notifier {
     }
 
     @SuppressLint("MissingPermission")
-    fun statusChanged(c: Context, m: Monitor, status: Int, msg: String) {
+    fun statusChanged(c: Context, m: Monitor, down: Boolean, msg: String) {
         val nmc = NotificationManagerCompat.from(c)
         if (!nmc.areNotificationsEnabled()) return
-        val down = status == ST_DOWN
         val n = NotificationCompat.Builder(c, CH_ALERT)
             .setSmallIcon(R.drawable.ic_notif)
             .setColor(if (down) 0xFFDC3545.toInt() else 0xFF5CDD8B.toInt())
             .setContentTitle(if (down) "🔴 ${m.name} è offline" else "🟢 ${m.name} è di nuovo online")
             .setContentText(msg)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(msg))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setShowWhen(true)

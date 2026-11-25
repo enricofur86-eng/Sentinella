@@ -50,6 +50,7 @@ import com.sentinella.mobile.DAY_MS
 import com.sentinella.mobile.Db
 import com.sentinella.mobile.Engine
 import com.sentinella.mobile.Monitor
+import com.sentinella.mobile.Outage
 import com.sentinella.mobile.ST_UP
 import com.sentinella.mobile.TYPE_HTTP
 import kotlinx.coroutines.launch
@@ -72,8 +73,10 @@ private data class DetailData(
     val up24: Double?,
     val up30: Double?,
     val avg24: Double?,
-    val events: List<Beat>,
+    val outages: List<Outage>,
+    val out24: List<Outage>,
     val chart: ChartData,
+    val now: Long,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -93,8 +96,16 @@ fun DetailScreen(id: Long, onBack: () -> Unit, onEdit: () -> Unit, onDeleted: ()
             up24 = db.uptime(id, now - DAY_MS),
             up30 = db.uptime(id, now - 30 * DAY_MS),
             avg24 = db.avgPing(id, now - DAY_MS),
-            events = db.events(id, 30),
-            chart = buildChart(db.beatsSince(id, from), from, now, m.intervalSec * 1000L),
+            outages = db.outages(id, 50),
+            out24 = db.outagesSince(id, now - DAY_MS),
+            chart = run {
+                val bucket = chartBucket(from, now, m.intervalSec * 1000L)
+                buildChart(
+                    db.chartPoints(id, from, bucket), db.outagesSince(id, from),
+                    from, now, bucket, m.intervalSec * 1000L,
+                )
+            },
+            now = now,
         )
     }
     var selected by remember { mutableStateOf<Beat?>(null) }
@@ -168,6 +179,15 @@ fun DetailScreen(id: Long, onBack: () -> Unit, onEdit: () -> Unit, onDeleted: ()
                         onSelect = { b -> selected = if (b?.id == selected?.id) null else b },
                     )
                     Spacer(Modifier.height(12.dp))
+                    val open = d.outages.firstOrNull()?.takeIf { it.ongoing && m.active }
+                    if (open != null) {
+                        Text(
+                            "Non risponde da ${fmtDuration(open.duration(d.now))} (dalle ${fmtWhen(open.start)})",
+                            color = if (open.reachedDown) K.Red else K.Orange,
+                            fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         UptimePill(statusLabel(d.last?.status, m.active), color)
                         Spacer(Modifier.width(10.dp))
@@ -243,27 +263,32 @@ fun DetailScreen(id: Long, onBack: () -> Unit, onEdit: () -> Unit, onDeleted: ()
                 }
             }
 
-            // eventi
+            // interruzioni
             item {
                 KCard(Modifier.fillMaxWidth()) {
-                    Text("Eventi importanti", fontWeight = FontWeight.SemiBold)
+                    Text("Interruzioni", fontWeight = FontWeight.SemiBold)
+                    val dayStart = d.now - DAY_MS
+                    val total24 = d.out24.sumOf { minOf(it.end ?: d.now, d.now) - maxOf(it.start, dayStart) }
+                    Text(
+                        if (d.out24.isEmpty()) "Nessuna nelle ultime 24 ore"
+                        else "Ultime 24 ore: ${d.out24.size} " +
+                            (if (d.out24.size == 1) "interruzione" else "interruzioni") +
+                            ", in tutto ${fmtDuration(total24)}",
+                        color = K.Muted, fontSize = 13.sp,
+                    )
                     Spacer(Modifier.height(6.dp))
-                    if (d.events.isEmpty()) {
-                        Text("Nessun evento", color = K.Muted, fontSize = 13.sp)
+                    if (d.outages.isEmpty()) {
+                        Text("Nessuna interruzione registrata", color = K.Muted, fontSize = 13.sp)
                     }
-                    d.events.forEachIndexed { i, e ->
+                    d.outages.forEachIndexed { i, o ->
                         if (i > 0) HorizontalDivider(color = K.Border)
-                        Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            UptimePill(statusLabel(e.status, true), statusColor(e.status, true), Modifier.width(78.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(fmtDateTime(e.time), fontSize = 13.sp)
-                                if (e.msg.isNotBlank()) {
-                                    Text(e.msg, color = K.Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
-                        }
+                        OutageRow(o, d.now)
                     }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Rosso: segnato offline. Arancione: controlli falliti per poco, senza avviso.",
+                        color = K.Muted, fontSize = 11.sp,
+                    )
                 }
             }
         }
@@ -286,6 +311,28 @@ fun DetailScreen(id: Long, onBack: () -> Unit, onEdit: () -> Unit, onDeleted: ()
                 dismissButton = { TextButton(onClick = { askDelete = false }) { Text("Annulla") } },
                 containerColor = K.Card2,
             )
+        }
+    }
+}
+
+@Composable
+private fun OutageRow(o: Outage, now: Long) {
+    val c = if (o.reachedDown) K.Red else K.Orange
+    Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        UptimePill(
+            if (o.ongoing) "In corso" else fmtDuration(o.duration(now)),
+            c, Modifier.width(88.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                if (o.end == null) "Dalle ${fmtWhen(o.start)} · da ${fmtDuration(o.duration(now))}"
+                else "${fmtWhen(o.start)} → ${fmtWhen(o.end)}",
+                fontSize = 13.sp,
+            )
+            if (o.msg.isNotBlank()) {
+                Text(o.msg, color = K.Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
 }

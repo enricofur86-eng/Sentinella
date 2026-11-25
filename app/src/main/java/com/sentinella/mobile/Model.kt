@@ -38,6 +38,19 @@ data class Beat(
     val msg: String,
 )
 
+/** Periodo in cui il servizio non ha risposto: dal primo controllo fallito al primo riuscito. */
+data class Outage(
+    val id: Long,
+    val monitorId: Long,
+    val start: Long,
+    val end: Long?,
+    val reachedDown: Boolean,
+    val msg: String,
+) {
+    val ongoing: Boolean get() = end == null
+    fun duration(now: Long = System.currentTimeMillis()): Long = (end ?: now) - start
+}
+
 object Prefs {
     private fun sp(c: Context) = c.getSharedPreferences("prefs", Context.MODE_PRIVATE)
 
