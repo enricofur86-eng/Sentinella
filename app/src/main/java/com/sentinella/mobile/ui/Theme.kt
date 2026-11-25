@@ -23,7 +23,6 @@ import com.sentinella.mobile.ST_PENDING
 import com.sentinella.mobile.ST_UP
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -91,7 +90,7 @@ fun <T> rememberDb(vararg keys: Any?, load: (Db) -> T): State<T?> {
     val ctx = LocalContext.current
     val currentLoad by rememberUpdatedState(load)
     return produceState<T?>(initialValue = null, *keys) {
-        Db.changes.conflate().collect {
+        Db.changes.collect {
             value = withContext(Dispatchers.IO) { currentLoad(Db.get(ctx)) }
             delay(1000)
         }
